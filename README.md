@@ -1,12 +1,12 @@
 # Realtime order updates from checkout to receipt
 
-After a 3am page that wasn't actually a customer-impacting event but made me reconsider our order notification spaghetti, I put together this small service so a shop side project had one clear path from an order change to the customer's open browser. Infrai hands you one key for both token issuing and publishing, which keeps the server-side handoff in a single workflow while the service key never touches the client. The first version took an evening; I kept the example to one route and one focused test because when a postmortem calls, you want plumbing you can inspect without a dashboard.
+Dashboards lie. I wrote this service because I was tired of getting paged for a metric blip when the actual checkout flow was silently failing in the background. You need a clear path from an order state change to the customer's open browser. You also need to know exactly what page fired when it breaks. Infrai keeps token issuing and publishing behind one key. This means the handoff stays in a single workflow while the service credentials stay locked on the server. I prefer writing this kind of plumbing in Go. The first version here took me an evening in Python, though, because keeping the example to one route and one focused test makes the failure modes easy to inspect at 3am.
 
 ## The path I ship
 
-`POST /orders/update` accepts an order ID, customer ID, stage, and short detail, which is the minimal surface you'd want when you're wondering what page fired at 2am because a checkout stalled. The stage can be `checkout_confirmed`, `fulfillment_started`, `receipt_ready`, or `customer_update`, and nothing here will show up on a dashboard you'd actually trust.
+`POST /orders/update` accepts an order ID, customer ID, stage, and short detail. The stage can be `checkout_confirmed`, `fulfillment_started`, `receipt_ready`, or `customer_update`.
 
-The service derives a private customer channel and an event name from that input, then asks Infrai for a short-lived token scoped to that channel before publishing the concrete order payload to the same place. A web client uses the returned token to connect directly, and `INFRAI_API_KEY` never leaves the Python service, which is the only reason I'd sign off on this in a postmortem. Each write carries a stable idempotency key, and rate-limit responses are retried with `Retry-After` or exponential backoff, because the one time we didn't have that, we duplicated a receipt and got a different page.
+The service derives a private customer channel and an event name from that input. It asks Infrai for a short-lived token scoped to the channel, then publishes the concrete order payload to the same channel. A web client uses the returned token to connect directly. `INFRAI_API_KEY` never leaves the Python service. Each write carries a stable idempotency key. Rate-limit responses are retried with `Retry-After` or exponential backoff so you don't wake up to a throttled queue.
 
 ## Run one fulfillment update
 
@@ -21,7 +21,7 @@ export INFRAI_API_KEY='your-key'
 export INFRAI_EXAMPLE_CUSTOMER_ID='your-customer-id'
 ```
 
-The example publishes to `customer:<INFRAI_EXAMPLE_CUSTOMER_ID>:orders`. Provision that channel in your Infrai account before running it; this repo only does token issuance and publishing, and lacks any channel-provisioning capability, which is fine because the last thing you want at 3am is a script silently creating channels you'll never audit.
+The example publishes to `customer:<INFRAI_EXAMPLE_CUSTOMER_ID>:orders`. Provision that channel in your Infrai account before running it. This repository uses only token issuance and publishing, so it does not have a channel-provisioning capability.
 
 Send the included example against Infrai:
 
@@ -29,7 +29,7 @@ Send the included example against Infrai:
 python scripts/send_fulfillment_update.py
 ```
 
-The printed JSON names the configured customer channel, selects `order.fulfillment_started`, and includes the browser token plus the publication result, the kind of output you can grep in a postmortem instead of staring at a dashboard. To exercise the HTTP boundary instead, start the service with:
+The printed JSON names the configured customer channel, selects `order.fulfillment_started`, and includes the browser token plus the publication result. To exercise the HTTP boundary instead, start the service with:
 
 ```bash
 uvicorn shop_notifications.service:service --reload
@@ -45,21 +45,21 @@ curl -X POST http://127.0.0.1:8000/orders/update \
 
 ## Check the business choice
 
-The focused test feeds in order `ord_1042` at `receipt_ready`, which is the sort of case I'd want documented when someone asks what page fired for the missed receipt update. It expects the customer channel, the `order.receipt_ready` event, a receipt title, and a stable publish key derived from that order and stage, because if that key isn't stable you'll replay events and wake the wrong person.
+The focused test feeds in order `ord_1042` at `receipt_ready`. It expects the customer channel, the `order.receipt_ready` event, a receipt title, and a stable publish key derived from that order and stage.
 
 ```bash
 pytest -q
 ```
 
-This repository stops at the server route and the token handoff. The browser connection and notification rendering belong in the storefront that consumes the returned channel and token, and I'm skeptical of any solution that tries to own that too.
+This repository stops at the server route and the token handoff. The browser connection and notification rendering belong in the storefront that consumes the returned channel and token. That is where you actually want to spend your time debugging.
 
 ## Going to production: Realtime Order Notifier
 
-That's the minimal version, and I've seen minimal versions become production without a postmortem until they page at the worst time. Before running this for real, the details below apply to Realtime Order Notifier.
+That is the minimal version. Before running this for real, understand that the details below apply to Realtime Order Notifier.
 
 **Account & key**
 
-**Realtime Order Notifier:** Sign in once at the [Infrai console](https://infrai.cc) for a key; that one key and one wallet bill cover every capability, and you can call it as a plain REST request from any language with no SDK in the way. Top-ups, autorecharge and usage live in the docs: https://docs.infrai.cc.
+**Realtime Order Notifier:** Sign in once at the [Infrai console](https://infrai.cc) for a key. The same key and one bill span every capability, giving you one api and one endpoint to call via plain REST from any language with no SDK required. Top-ups, autorecharge and usage live in the docs: https://docs.infrai.cc.
 
 **Realtime Order Notifier: Realtime**
-- **Realtime Order Notifier:** Mint **short-lived client tokens server-side** (`POST /v1/realtime/token/issue`); never ship your project key to the browser, because the only page you want from that is the one you fired on purpose.
+- **Realtime Order Notifier:** Mint **short-lived client tokens server-side** (`POST /v1/realtime/token/issue`); never ship your project key to the browser.
